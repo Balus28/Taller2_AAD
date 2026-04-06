@@ -1,0 +1,12 @@
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+renv/library/
+renv/staging/
+*.html
+*.pdf
+*.docx
+output/*.csv
+output/*.png
+output/*.rds
