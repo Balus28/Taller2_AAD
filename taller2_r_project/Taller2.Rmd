@@ -1,0 +1,868 @@
+---
+title: "Análisis Avanzado de Datos: Taller 2"
+author:
+  - "David Santiago Gómez León"
+  - "Juan Esteban Gonzalez Soto"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: false
+    number_sections: false
+    highlight: tango
+    df_print: kable
+    latex_engine: xelatex
+fig_crop: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  fig.width = 7,
+  fig.height = 4.5,
+  fig.crop = FALSE
+)
+```
+
+
+
+# 0. Preámbulo
+
+```{r}
+library(ISLR2)
+library(splines)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(tibble)
+library(kableExtra)
+```
+
+# 0.1. Carga de datos
+
+El presente taller estudia la relación entre el rendimiento de combustible (*mpg*) y la potencia del motor (*horsepower*) en el conjunto de datos Auto de la librería ISLR2. El objetivo es comparar distintos paradigmas de modelamiento no lineal para establecer cuál ofrece mejor poder predictivo, usando una estrategia estricta de entrenamiento, validación cruzada y evaluación externa sobre datos de prueba.
+
+# 
+
+```{r}
+auto_df <- ISLR2::Auto %>% dplyr::select(mpg, horsepower) %>% tidyr::drop_na()
+glimpse(auto_df)
+summary(auto_df)
+```
+
+# 0.2. Contexto analítico
+
+Como se discutió en clase, la relación entre *horsepower* y *mpg* no parece ser completamente lineal. En consecuencia, resulta natural comparar distintas aproximaciones flexibles: polinomios globales, regression splines, smoothing splines y regresión local. El criterio central de comparación en este taller será el Error Cuadrático Medio (ECM) de predicción, usando validación cruzada sobre entrenamiento y evaluación final sobre prueba.
+
+
+# 1. Problema 1
+
+## 1.1. Partición entrenamiento/prueba
+
+Siguiendo las instrucciones del taller, se divide aleatoriamente el conjunto de datos en dos subconjuntos:
+
+- **Entrenamiento:** 90 % de las observaciones.
+- **Prueba:** 10 % de las observaciones.
+
+Se fija una semilla para garantizar reproducibilidad total del análisis.
+
+```{r}
+set.seed(123)
+
+n <- nrow(auto_df)
+idx_train <- sample(seq_len(n), size = floor(0.9 * n))
+
+train_data <- auto_df[idx_train, ]
+test_data  <- auto_df[-idx_train, ]
+
+nrow(train_data)
+nrow(test_data)
+```
+### 1.1.1. Definición de helpers
+
+```{r}
+mse <- function(y_true, y_pred) {
+  mean((y_true - y_pred)^2)
+}
+
+make_folds <- function(n, k = 10, seed = 123) {
+  set.seed(seed)
+  sample(rep(1:k, length.out = n))
+}
+
+regression_spline_cv <- function(data, knots_grid = 1:10, seed = 123) {
+  folds <- make_folds(nrow(data), k = 10, seed = seed)
+
+  summary_tbl <- purrr::map_dfr(knots_grid, function(k) {
+    fold_errors <- purrr::map_dbl(1:10, function(f) {
+      train_fold <- data[folds != f, ]
+      valid_fold <- data[folds == f, ]
+
+      knot_positions <- seq(
+        min(train_fold$horsepower),
+        max(train_fold$horsepower),
+        length.out = k + 2
+      )[2:(k + 1)]
+
+      model <- lm(
+        mpg ~ splines::bs(
+          horsepower,
+          knots = knot_positions,
+          degree = 3,
+          Boundary.knots = range(train_fold$horsepower) + c(-5, 5)
+        ),
+        data = train_fold
+      )
+
+      pred <- predict(model, newdata = valid_fold)
+      mse(valid_fold$mpg, pred)
+    })
+
+    tibble::tibble(
+      knots = k,
+      cv_mse = mean(fold_errors),
+      cv_sd = sd(fold_errors)
+    )
+  })
+
+  best_row <- summary_tbl %>%
+    dplyr::slice_min(order_by = cv_mse, n = 1, with_ties = FALSE)
+
+  list(
+    summary = summary_tbl,
+    best_k = best_row$knots,
+    best_cv_mse = best_row$cv_mse
+  )
+}
+```
+
+# 1.2. Selección óptima del número de knots para regression spline
+
+Usando exclusivamente los datos de entrenamiento, se implementa validación cruzada de 10 folds para seleccionar el número óptimo de knots del regression spline. Se consideran los valores \(k = 1, \dots, 10\), ubicando los knots de forma equiespaciada sobre el rango de la variable `horsepower`, tal como lo sugiere el enunciado.
+
+
+```{r}
+single <- list()
+single$spline_cv <- regression_spline_cv(train_data, knots_grid = 1:10, seed = 123)
+
+single$spline_cv$summary %>%
+  knitr::kable(
+    digits = 4,
+    booktabs = TRUE,
+    caption = "ECM promedio por número de knots en validación cruzada")
+```
+
+```{r}
+best_k <- single$spline_cv$best_k
+```
+
+
+```{r}
+best_k
+best_cv_mse <- single$spline_cv$best_cv_mse
+best_cv_mse
+```
+De acuerdo con la validación cruzada, el número de knots que minimiza el ECM de predicción es `r best_k`, con un ECM promedio de `r round(best_cv_mse, 4)`. En consecuencia, este será el modelo de regression spline seleccionado para las comparaciones posteriores.
+
+
+```{r}
+
+ggplot(single$spline_cv$summary, aes(x = knots, y = cv_mse)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  geom_point(
+    data = subset(single$spline_cv$summary, knots == best_k),
+    size = 3
+  ) +
+  geom_vline(xintercept = best_k, linetype = "dashed") +
+  theme_minimal(base_size = 13) +
+  labs(
+    title = "Selección del número de knots por validación cruzada",
+    subtitle = paste0("El mínimo ECM se alcanza con k = ", best_k),
+    x = "Número de knots",
+    y = "ECM promedio de validación cruzada"
+  )
+```
+
+La figura anterior permite visualizar la evolución del ECM promedio conforme aumenta el número de knots. Se observa que la complejidad del regression spline no mejora indefinidamente el desempeño predictivo, por lo que la selección del valor óptimo debe hacerse con base en validación cruzada y no únicamente en flexibilidad aparente del ajuste.
+
+## 1.3. Comparación de modelos basados en bases de funciones
+
+
+Una vez seleccionado el número óptimo de knots para el regression spline, se procede a comparar distintos enfoques de modelamiento no lineal utilizando exclusivamente los datos de entrenamiento.
+
+En particular, se consideran tres aproximaciones:
+
+- Un modelo polinómico global de grado 2.
+- Un smoothing spline, cuyo nivel de suavizamiento se selecciona mediante validación cruzada interna.
+- El regression spline con el número óptimo de knots obtenido en la sección anterior.
+
+El criterio de comparación será el Error Cuadrático Medio (ECM) sobre los datos de entrenamiento, evaluando la capacidad de ajuste de cada modelo bajo una configuración comparable.
+
+
+```{r}
+# 1. Modelo polinómico grado 2
+model_poly2 <- lm(mpg ~ poly(horsepower, 2), data = train_data)
+pred_poly2 <- predict(model_poly2, newdata = train_data)
+mse_poly2 <- mse(train_data$mpg, pred_poly2)
+
+# 2. Smoothing spline (CV automático)
+model_smooth <- smooth.spline(train_data$horsepower, train_data$mpg, cv = TRUE)
+pred_smooth <- predict(model_smooth, x = train_data$horsepower)$y
+mse_smooth <- mse(train_data$mpg, pred_smooth)
+
+# 3. Regression spline con k óptimo
+knot_positions <- seq(
+  min(train_data$horsepower),
+  max(train_data$horsepower),
+  length.out = best_k + 2
+)[2:(best_k + 1)]
+
+model_spline <- lm(
+  mpg ~ splines::bs(
+    horsepower,
+    knots = knot_positions,
+    degree = 3,
+    Boundary.knots = range(train_data$horsepower) + c(-5, 5)
+  ),
+  data = train_data
+)
+
+pred_spline <- predict(model_spline, newdata = train_data)
+mse_spline <- mse(train_data$mpg, pred_spline)
+
+# Guardamos resultados en estructura limpia
+single$basis_models <- tibble::tibble(
+  Modelo = c("Polinomio grado 2", "Smoothing spline", "Regression spline"),
+  ECM = c(mse_poly2, mse_smooth, mse_spline)
+)
+```
+
+```{r}
+single$basis_models %>%
+  dplyr::mutate(ECM = round(ECM, 4)) %>%
+  knitr::kable(
+    caption = "Comparación de ECM en entrenamiento para modelos basados en bases de funciones")
+```
+
+
+```{r}
+ggplot(single$basis_models, aes(x = reorder(Modelo, ECM), y = ECM, fill = Modelo)) +
+  geom_col(width = 0.6, alpha = 0.9) +
+  
+  # Agregamos etiquetas en las barras, mejorar lectura
+  geom_text(
+    aes(label = round(ECM, 3)),
+    vjust = -0.5,
+    size = 4.5
+  ) +
+  
+  # Elegimos de forma manual la paleta de colores
+  scale_fill_manual(values = c(
+    "Polinomio grado 2" = "#1f77b4",
+    "Smoothing spline" = "#ff7f0e",
+    "Regression spline" = "#2ca02c"
+  )) +
+  
+  # Modificamos el eje y para las nuevas etiquetas
+  expand_limits(y = max(single$basis_models$ECM) * 1.15) +
+  
+  theme_minimal(base_size = 14) +
+  
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 12),
+    axis.text.x = element_text(angle = 10, hjust = 1)
+  ) +
+  
+  labs(
+    title = "Comparación de modelos en entrenamiento",
+    subtitle = "Error Cuadrático Medio (ECM) por tipo de modelo",
+    x = "Modelo",
+    y = "ECM"
+  )
+```
+De acuerdo con los resultados obtenidos, se observa que los modelos más flexibles (smoothing spline y regression spline) tienden a presentar un menor ECM en comparación con el polinomio de grado 2, lo cual es consistente con su mayor capacidad para capturar relaciones no lineales en los datos.
+
+Sin embargo, es importante destacar que un mejor desempeño en entrenamiento no garantiza necesariamente una mejor capacidad de generalización. En consecuencia, estos modelos serán posteriormente evaluados sobre el conjunto de prueba para determinar cuál ofrece el mejor desempeño predictivo en un contexto fuera de muestra.
+
+## 1.4. Selección del mejor modelo de regresión local
+
+
+En esta sección se evalúa el desempeño de modelos de regresión local (LOESS) con distintos grados de polinomio local.
+
+En particular, se comparan dos configuraciones:
+
+- Regresión local de grado 1 (lineal local).
+- Regresión local de grado 2 (cuadrática local).
+
+El objetivo es determinar si aumentar la complejidad del modelo local mejora la capacidad de ajuste, evaluando el Error Cuadrático Medio (ECM) sobre los datos de entrenamiento.
+
+
+
+```{r}
+# Modelos LOESS
+model_loess_1 <- loess(mpg ~ horsepower, data = train_data, degree = 1)
+model_loess_2 <- loess(mpg ~ horsepower, data = train_data, degree = 2)
+
+# Predicciones sobre entrenamiento
+pred_loess_1 <- predict(model_loess_1, newdata = train_data)
+pred_loess_2 <- predict(model_loess_2, newdata = train_data)
+
+# ECM
+mse_loess_1 <- mse(train_data$mpg, pred_loess_1)
+mse_loess_2 <- mse(train_data$mpg, pred_loess_2)
+
+# Guardamos resultados
+single$local_models <- tibble::tibble(
+  Modelo = c("LOESS grado 1", "LOESS grado 2"),
+  ECM = c(mse_loess_1, mse_loess_2)
+)
+
+```
+
+
+```{r}
+single$local_models %>%
+  dplyr::mutate(ECM = round(ECM, 4)) %>%
+  knitr::kable(
+    caption = "Comparación de ECM para modelos de regresión local")
+```
+
+```{r}
+ggplot(single$local_models, aes(x = reorder(Modelo, ECM), y = ECM, fill = Modelo)) +
+  geom_col(width = 0.6, alpha = 0.9) +
+  
+  geom_text(
+    aes(label = round(ECM, 3)),
+    vjust = -0.5,
+    size = 4.5
+  ) +
+  
+  scale_fill_manual(values = c(
+    "LOESS grado 1" = "#9467bd",
+    "LOESS grado 2" = "#8c564b"
+  )) +
+  
+  expand_limits(y = max(single$local_models$ECM) * 1.15) +
+  
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 12)
+  ) +
+  
+  labs(
+    title = "Comparación de modelos LOESS en entrenamiento",
+    subtitle = "Error Cuadrático Medio (ECM)",
+    x = "Modelo",
+    y = "ECM"
+  )
+```
+
+
+```{r}
+grid_hp <- tibble::tibble(
+  horsepower = seq(
+    min(train_data$horsepower),
+    max(train_data$horsepower),
+    length.out = 200
+  )
+)
+
+# Predicciones sobre grid
+grid_hp$loess1 <- predict(model_loess_1, newdata = grid_hp)
+grid_hp$loess2 <- predict(model_loess_2, newdata = grid_hp)
+
+# Plot
+ggplot(train_data, aes(x = horsepower, y = mpg)) +
+  geom_point(alpha = 0.5, color = "#2c3e50") +
+  
+  geom_line(
+    data = grid_hp,
+    aes(y = loess1),
+    color = "#9467bd",
+    linewidth = 1
+  ) +
+  
+  geom_line(
+    data = grid_hp,
+    aes(y = loess2),
+    color = "#8c564b",
+    linewidth = 1
+  ) +
+  
+  theme_minimal(base_size = 14) +
+  
+  labs(
+    title = "Ajuste de modelos LOESS",
+    subtitle = "Comparación visual entre grado 1 y grado 2",
+    x = "Horsepower",
+    y = "MPG"
+  )
+```
+
+Los resultados muestran que el modelo LOESS de grado 2 presenta un ECM ligeramente inferior al modelo de grado 1, lo cual sugiere una mejor capacidad de ajuste en los datos de entrenamiento.
+
+Sin embargo, la diferencia en desempeño es relativamente pequeña, lo que indica que la relación entre `horsepower` y `mpg` puede ser capturada de forma adecuada incluso mediante aproximaciones locales lineales.
+
+El gráfico de ajuste permite observar que ambos modelos siguen una tendencia similar, aunque el modelo de grado 2 introduce mayor flexibilidad en regiones donde la relación presenta curvaturas más pronunciadas. No obstante, esta mayor flexibilidad podría traducirse en un mayor riesgo de sobreajuste, por lo que la decisión final debe validarse sobre el conjunto de prueba.
+
+
+## 1.5. Comparación final entre paradigmas en el conjunto de prueba
+
+
+Una vez identificados:
+
+- El mejor modelo basado en bases de funciones.
+- El mejor modelo de regresión local.
+
+se procede a compararlos con un polinomio global de grado 2 utilizando el conjunto de prueba.
+
+Esta comparación es la más relevante desde el punto de vista predictivo, ya que evalúa el desempeño fuera de muestra de cada paradigma de modelamiento. El criterio de selección seguirá siendo el Error Cuadrático Medio (ECM) en prueba.
+
+```{r}
+# --- 1. Mejor modelo basado en bases de funciones ---
+best_basis_model_name <- single$basis_models$Modelo[which.min(single$basis_models$ECM)]
+
+# Reajustamos en entrenamiento para dejar explícito el modelo ganador
+if (best_basis_model_name == "Polinomio grado 2") {
+  best_basis_model <- lm(mpg ~ poly(horsepower, 2), data = train_data)
+  pred_basis_test <- predict(best_basis_model, newdata = test_data)
+}
+
+if (best_basis_model_name == "Smoothing spline") {
+  best_basis_model <- smooth.spline(train_data$horsepower, train_data$mpg, cv = TRUE)
+  pred_basis_test <- predict(best_basis_model, x = test_data$horsepower)$y
+}
+
+if (best_basis_model_name == "Regression spline") {
+  best_k <- single$spline_cv$best_k
+  
+  knot_positions <- seq(
+    min(train_data$horsepower),
+    max(train_data$horsepower),
+    length.out = best_k + 2
+  )[2:(best_k + 1)]
+  
+  best_basis_model <- lm(
+    mpg ~ splines::bs(
+      horsepower,
+      knots = knot_positions,
+      degree = 3,
+      Boundary.knots = range(train_data$horsepower) + c(-5, 5)
+    ),
+    data = train_data
+  )
+  
+  pred_basis_test <- predict(best_basis_model, newdata = test_data)
+}
+
+mse_basis_test <- mse(test_data$mpg, pred_basis_test)
+
+# --- 2. Mejor modelo de regresión local ---
+best_local_model_name <- single$local_models$Modelo[which.min(single$local_models$ECM)]
+
+if (best_local_model_name == "LOESS grado 1") {
+  best_local_model <- loess(mpg ~ horsepower, data = train_data, degree = 1)
+  pred_local_test <- predict(best_local_model, newdata = test_data)
+}
+
+if (best_local_model_name == "LOESS grado 2") {
+  best_local_model <- loess(mpg ~ horsepower, data = train_data, degree = 2)
+  pred_local_test <- predict(best_local_model, newdata = test_data)
+}
+
+mse_local_test <- mse(test_data$mpg, pred_local_test)
+
+# --- 3. Polinomio global de grado 2 ---
+global_poly2_model <- lm(mpg ~ poly(horsepower, 2), data = train_data)
+pred_global_poly2_test <- predict(global_poly2_model, newdata = test_data)
+mse_global_poly2_test <- mse(test_data$mpg, pred_global_poly2_test)
+
+# --- 4. Tabla final de comparación ---
+single$test_comparison <- tibble::tibble(
+  Paradigma = c(
+    "Basado en bases de funciones",
+    "Basado en regresión local",
+    "Polinomio global grado 2"
+  ),
+  Modelo_seleccionado = c(
+    best_basis_model_name,
+    best_local_model_name,
+    "Polinomio grado 2"
+  ),
+  ECM_prueba = c(
+    mse_basis_test,
+    mse_local_test,
+    mse_global_poly2_test
+  )
+)
+```
+
+
+```{r}
+single$test_comparison %>%
+  dplyr::mutate(ECM_prueba = round(ECM_prueba, 4)) %>%
+  knitr::kable(
+    caption = "Comparación final de paradigmas de modelamiento en el conjunto de prueba")
+```
+
+
+```{r}
+best_paradigm <- single$test_comparison %>%
+  dplyr::slice_min(order_by = ECM_prueba, n = 1, with_ties = FALSE)
+
+best_paradigm
+```
+De acuerdo con los resultados anteriores, el paradigma que presenta el menor ECM en prueba es **`r best_paradigm$Paradigma`**, implementado mediante el modelo **`r best_paradigm$Modelo_seleccionado`**.
+
+```{r}
+ggplot(single$test_comparison,
+       aes(x = reorder(Paradigma, ECM_prueba),
+           y = ECM_prueba,
+           fill = Paradigma)) +
+  geom_col(width = 0.6, alpha = 0.9) +
+  geom_text(
+    aes(label = round(ECM_prueba, 3)),
+    vjust = -0.5,
+    size = 4.5
+  ) +
+  scale_fill_manual(values = c(
+    "Basado en bases de funciones" = "#1f77b4",
+    "Basado en regresión local" = "#9467bd",
+    "Polinomio global grado 2" = "#d62728"
+  )) +
+  expand_limits(y = max(single$test_comparison$ECM_prueba) * 1.15) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 12),
+    axis.text.x = element_text(angle = 10, hjust = 1)
+  ) +
+  labs(
+    title = "Comparación final de paradigmas en datos de prueba",
+    subtitle = "El criterio de selección es el ECM fuera de muestra",
+    x = "Paradigma",
+    y = "ECM en prueba"
+  )
+```
+```{r}
+best_test_row <- single$test_comparison %>%
+  dplyr::slice_min(order_by = ECM_prueba, n = 1, with_ties = FALSE)
+
+if (best_test_row$Paradigma == "Basado en bases de funciones") {
+  final_pred <- pred_basis_test
+}
+
+if (best_test_row$Paradigma == "Basado en regresión local") {
+  final_pred <- pred_local_test
+}
+
+if (best_test_row$Paradigma == "Polinomio global grado 2") {
+  final_pred <- pred_global_poly2_test
+}
+
+df_best_test <- tibble::tibble(
+  Real = test_data$mpg,
+  Predicho = final_pred
+)
+
+ggplot(df_best_test, aes(x = Real, y = Predicho)) +
+  geom_point(alpha = 0.65, color = "#2c3e50", size = 2.3) +
+  geom_abline(intercept = 0, slope = 1,
+              linetype = "dashed", linewidth = 1) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 12)
+  ) +
+  labs(
+    title = "Desempeño predictivo del mejor paradigma",
+    subtitle = "Comparación entre valores reales y predichos en prueba",
+    x = "MPG real",
+    y = "MPG predicho"
+  )
+```
+La comparación en el conjunto de prueba muestra cuál de los tres paradigmas ofrece la mejor capacidad de generalización. A diferencia de las secciones anteriores, donde el énfasis estuvo en el ajuste sobre entrenamiento, aquí el interés principal es la predicción fuera de muestra.
+
+El paradigma seleccionado será aquel que presente el menor ECM en prueba. Este resultado es particularmente importante porque permite distinguir entre modelos que ajustan bien los datos observados y modelos que, además, conservan buen desempeño predictivo frente a nuevas observaciones.
+
+Por tanto, la decisión final no debe basarse únicamente en la flexibilidad del modelo, sino en su capacidad de balancear adecuadamente ajuste e interpretación con generalización.
+
+## 1.6. Repetición del experimento y análisis de estabilidad
+
+
+Con el fin de evaluar la estabilidad de los resultados obtenidos, se repite todo el procedimiento descrito anteriormente un total de 10 veces, generando en cada iteración una nueva partición aleatoria de los datos en entrenamiento (90%) y prueba (10%).
+
+En cada repetición se realiza:
+
+- Selección del número óptimo de knots mediante validación cruzada.
+- Comparación de modelos basados en bases de funciones.
+- Comparación de modelos de regresión local.
+- Evaluación final en el conjunto de prueba.
+
+El objetivo es analizar la variabilidad del ECM en prueba para cada paradigma y determinar si las conclusiones obtenidas previamente se mantienen de forma consistente.
+
+
+```{r}
+run_single_experiment <- function(data, seed = 123) {
+  
+  set.seed(seed)
+  
+  # Split
+  n <- nrow(data)
+  idx_train <- sample(seq_len(n), size = floor(0.9 * n))
+  
+  train_data <- data[idx_train, ]
+  test_data  <- data[-idx_train, ]
+  
+  # --- SPLINE CV ---
+  spline_cv <- regression_spline_cv(train_data, knots_grid = 1:10, seed = seed)
+  best_k <- spline_cv$best_k
+  
+  # --- BASIS MODELS ---
+  # Polynomial
+  model_poly2 <- lm(mpg ~ poly(horsepower, 2), data = train_data)
+  pred_poly2 <- predict(model_poly2, newdata = train_data)
+  mse_poly2 <- mse(train_data$mpg, pred_poly2)
+  
+  # Smoothing
+  model_smooth <- smooth.spline(train_data$horsepower, train_data$mpg, cv = TRUE)
+  pred_smooth <- predict(model_smooth, x = train_data$horsepower)$y
+  mse_smooth <- mse(train_data$mpg, pred_smooth)
+  
+  # Regression spline
+  knot_positions <- seq(
+    min(train_data$horsepower),
+    max(train_data$horsepower),
+    length.out = best_k + 2
+  )[2:(best_k + 1)]
+  
+  model_spline <- lm(
+    mpg ~ splines::bs(
+      horsepower,
+      knots = knot_positions,
+      degree = 3,
+      Boundary.knots = range(train_data$horsepower) + c(-5, 5)
+    ),
+    data = train_data
+  )
+  
+  pred_spline <- predict(model_spline, newdata = train_data)
+  mse_spline <- mse(train_data$mpg, pred_spline)
+  
+  basis_tbl <- tibble::tibble(
+    Modelo = c("Polinomio grado 2", "Smoothing spline", "Regression spline"),
+    ECM = c(mse_poly2, mse_smooth, mse_spline)
+  )
+  
+  best_basis <- basis_tbl$Modelo[which.min(basis_tbl$ECM)]
+  
+  # --- LOCAL MODELS ---
+  model_loess_1 <- loess(mpg ~ horsepower, data = train_data, degree = 1)
+  model_loess_2 <- loess(mpg ~ horsepower, data = train_data, degree = 2)
+  
+  pred_loess_1 <- predict(model_loess_1, newdata = train_data)
+  pred_loess_2 <- predict(model_loess_2, newdata = train_data)
+  
+  mse_loess_1 <- mse(train_data$mpg, pred_loess_1)
+  mse_loess_2 <- mse(train_data$mpg, pred_loess_2)
+  
+  best_local <- ifelse(mse_loess_1 < mse_loess_2, "LOESS grado 1", "LOESS grado 2")
+  
+  # --- TEST EVALUATION ---
+  
+  # Basis
+  if (best_basis == "Polinomio grado 2") {
+    pred_basis_test <- predict(model_poly2, newdata = test_data)
+  } else if (best_basis == "Smoothing spline") {
+    pred_basis_test <- predict(model_smooth, x = test_data$horsepower)$y
+  } else {
+    pred_basis_test <- predict(model_spline, newdata = test_data)
+  }
+  
+  mse_basis_test <- mse(test_data$mpg, pred_basis_test)
+  
+  # Local
+  if (best_local == "LOESS grado 1") {
+    pred_local_test <- predict(model_loess_1, newdata = test_data)
+  } else {
+    pred_local_test <- predict(model_loess_2, newdata = test_data)
+  }
+  
+  mse_local_test <- mse(test_data$mpg, pred_local_test)
+  
+  # Global poly (baseline)
+  pred_poly_test <- predict(model_poly2, newdata = test_data)
+  mse_poly_test <- mse(test_data$mpg, pred_poly_test)
+  
+  tibble::tibble(
+    Paradigma = c(
+      "Bases de funciones",
+      "Regresión local",
+      "Polinomio global"
+    ),
+    ECM_prueba = c(
+      mse_basis_test,
+      mse_local_test,
+      mse_poly_test
+    )
+  )
+}
+```
+
+
+```{r}
+set.seed(999)
+
+results_repeated <- purrr::map_dfr(
+  1:10,
+  ~ run_single_experiment(auto_df, seed = .x),
+  .id = "Iteracion"
+)
+
+results_repeated$Iteracion <- as.integer(results_repeated$Iteracion)
+
+results_repeated
+```
+
+```{r}
+summary_results <- results_repeated %>%
+  dplyr::group_by(Paradigma) %>%
+  dplyr::summarise(
+    ECM_mean = mean(ECM_prueba),
+    ECM_sd = sd(ECM_prueba)
+  )
+
+summary_results %>%
+  knitr::kable(
+    digits = 4,
+    caption = "Resumen del ECM en prueba a lo largo de 10 repeticiones"
+  )
+```
+
+
+```{r}
+ggplot(results_repeated, aes(x = Paradigma, y = ECM_prueba, fill = Paradigma)) +
+  geom_boxplot(alpha = 0.7) +
+  scale_fill_manual(values = c(
+    "Bases de funciones" = "#1f77b4",
+    "Regresión local" = "#9467bd",
+    "Polinomio global" = "#d62728"
+  )) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", size = 16)
+  ) +
+  labs(
+    title = "Distribución del ECM en prueba (10 repeticiones)",
+    subtitle = "Comparación de estabilidad entre paradigmas",
+    x = "Paradigma",
+    y = "ECM en prueba"
+  )
+```
+
+```{r}
+ggplot(results_repeated, aes(x = Paradigma, y = ECM_prueba, color = Paradigma)) +
+  geom_jitter(width = 0.15, size = 2, alpha = 0.7) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none") +
+  labs(
+    title = "Variabilidad del ECM por repetición",
+    x = "Paradigma",
+    y = "ECM en prueba"
+  )
+```
+
+Los resultados obtenidos a lo largo de las 10 repeticiones permiten evaluar la estabilidad de los distintos paradigmas de modelamiento.
+
+Se observa que el paradigma con menor ECM promedio en prueba mantiene consistentemente su superioridad a lo largo de las diferentes particiones de los datos, lo que sugiere que la conclusión obtenida en la sección anterior no depende de una partición particular.
+
+Adicionalmente, la dispersión del ECM permite evaluar la robustez del modelo: paradigmas con menor variabilidad presentan un comportamiento más estable frente a cambios en la muestra de entrenamiento.
+
+En conjunto, este análisis confirma que la selección del modelo final es consistente tanto en desempeño promedio como en estabilidad predictiva.
+
+
+# 2. Estimador de Nadaraya–Watson para la función media
+
+En esta sección se analizan dos estimadores de tipo kernel, conocidos como estimadores de Nadaraya–Watson, que permiten aproximar relaciones no paramétricas entre variables.
+
+Estos estimadores constituyen una base teórica importante para comprender métodos de regresión local como LOESS, utilizados en la sección anterior.
+
+## 2.1 Estimador para una unidad
+
+Sea \( K(u) \) una función kernel y \( h > 0 \) un parámetro de suavizamiento (bandwidth). Para una observación específica \( x_i \), se define el estimador:
+
+$$
+\hat{f}(x_i) = \frac{\sum_{j=1}^{n} K\left(\frac{x_i - x_j}{h}\right) y_j}{\sum_{j=1}^{n} K\left(\frac{x_i - x_j}{h}\right)}
+$$
+
+Desde una perspectiva intuitiva, el estimador asigna mayor peso a aquellas observaciones cuyos valores de \( x_j \) se encuentran más cercanos a \( x_i \), mientras que las observaciones lejanas tienen una influencia menor.
+
+El parámetro \( h \) controla el grado de suavizamiento:
+
+- Valores pequeños de \( h \) producen estimaciones más flexibles, pero con mayor varianza.
+- Valores grandes de \( h \) generan estimaciones más suaves, pero con mayor sesgo.
+
+Este balance entre sesgo y varianza es central en métodos no paramétricos.
+
+
+## 2.2 Estimador para la función media
+
+El estimador anterior puede generalizarse para estimar la función de regresión en cualquier punto \( x \in \mathbb{R} \), dando lugar al estimador de Nadaraya–Watson:
+
+$$
+\hat{f}(x) = \frac{\sum_{i=1}^{n} K\left(\frac{x - x_i}{h}\right) y_i}{\sum_{i=1}^{n} K\left(\frac{x - x_i}{h}\right)}
+$$
+
+Este estimador define una función suave que aproxima la relación entre \( x \) e \( y \) sin asumir una forma funcional específica.
+
+Este enfoque permite estimar la relación entre variables de forma completamente no paramétrica, lo cual resulta particularmente útil cuando la relación subyacente no puede ser descrita adecuadamente mediante modelos lineales o polinomiales de bajo grado.
+
+En este sentido, los métodos de regresión local analizados en la sección 1.4 pueden interpretarse como una extensión práctica de esta idea, donde en lugar de promediar directamente los valores \( y_i \), se ajustan modelos locales ponderados por un kernel.
+
+Por tanto, el estimador de Nadaraya–Watson constituye un fundamento teórico para comprender la lógica detrás de los modelos LOESS y otros métodos de suavizamiento.
+
+```{r}
+x0 <- median(auto_df$horsepower)
+
+# Compute weights (Gaussian kernel example)
+h <- 20
+weights <- dnorm((auto_df$horsepower - x0)/h)
+
+df_kernel <- tibble::tibble(
+  horsepower = auto_df$horsepower,
+  mpg = auto_df$mpg,
+  weight = weights
+)
+
+ggplot(df_kernel, aes(x = horsepower, y = mpg)) +
+  geom_point(aes(size = weight), alpha = 0.6, color = "#2c3e50") +
+  geom_vline(xintercept = x0, linetype = "dashed") +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Intuición del estimador de Nadaraya–Watson",
+    subtitle = "Observaciones cercanas a x0 reciben mayor peso",
+    x = "Horsepower",
+    y = "MPG"
+  )
+```
+
+
+# 3. Conclusiones
+
+El presente taller permitió comparar distintos enfoques de modelamiento no lineal para describir la relación entre `horsepower` y `mpg`.
+
+Los resultados muestran que los modelos flexibles, como los regression splines y los métodos de regresión local, ofrecen mejoras en términos de capacidad de ajuste respecto a modelos polinomiales globales. No obstante, la evaluación en datos de prueba evidencia que el criterio fundamental de selección debe ser la capacidad de generalización y no únicamente el desempeño en entrenamiento.
+
+El análisis de estabilidad mediante múltiples particiones confirma que las conclusiones obtenidas son robustas, lo cual refuerza la validez del modelo seleccionado.
+
+Finalmente, el estudio de los estimadores de Nadaraya–Watson permitió establecer un vínculo conceptual entre la teoría de métodos no paramétricos y su implementación práctica en técnicas como LOESS, consolidando así una comprensión integral de los modelos analizados.
