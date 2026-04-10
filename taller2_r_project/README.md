@@ -20,11 +20,7 @@ install.packages(c(
 1. Abra la carpeta del proyecto en RStudio.
 2. Instale los paquetes requeridos.
 3. Compile `Taller2.Rmd`.
-4. Si desea exportar resultados primero, corra:
 
-```r
-source("scripts_run_analysis.R")
-```
 
 ## Recomendación Git
 
